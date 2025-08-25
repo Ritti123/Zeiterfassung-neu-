@@ -12,6 +12,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { useToast } from "@/hooks/use-toast"
 import {
   Clock,
   Play,
@@ -30,6 +32,7 @@ import {
   Database,
   AlertTriangle,
   CheckCircle,
+  Edit,
 } from "lucide-react"
 
 interface TimeEntry {
@@ -101,6 +104,14 @@ const ZeiterfassungApp = () => {
 
   const [dataAlert, setDataAlert] = useState<{ type: "success" | "error" | "warning"; message: string } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const [editingEntry, setEditingEntry] = useState<TimeEntry | null>(null)
+  const [editStartTime, setEditStartTime] = useState("")
+  const [editEndTime, setEditEndTime] = useState("")
+  const [editBreakMinutes, setEditBreakMinutes] = useState(30)
+  const [editNote, setEditNote] = useState("")
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
+  const { toast } = useToast()
 
   const getTargetHoursForDate = (date: string): number => {
     const dateObj = new Date(date)
@@ -657,124 +668,200 @@ const ZeiterfassungApp = () => {
     }
   }
 
+  const deleteEntry = (entryId: string) => {
+    const updatedEntries = timeEntries.filter((entry) => entry.id !== entryId)
+    setTimeEntries(updatedEntries)
+    saveToStorage(updatedEntries, dailyTargetHours, weeklyTargetHours, overtimeHistory, absenceSettings)
+    toast({
+      title: "Eintrag gelöscht",
+      description: "Der Zeiteintrag wurde erfolgreich gelöscht.",
+    })
+  }
+
+  const startEditEntry = (entry: TimeEntry) => {
+    setEditingEntry(entry)
+    setEditStartTime(entry.startTime)
+    setEditEndTime(entry.endTime)
+    setEditBreakMinutes(entry.breakMinutes)
+    setEditNote(entry.note || "")
+    setIsEditDialogOpen(true)
+  }
+
+  const saveEditedEntry = () => {
+    if (!editingEntry) return
+
+    const startMinutes = timeToMinutes(editStartTime)
+    const endMinutes = timeToMinutes(editEndTime)
+    const workedMinutes = endMinutes - startMinutes - editBreakMinutes
+    const workedHours = Math.max(0, workedMinutes / 60)
+
+    const updatedEntry: TimeEntry = {
+      ...editingEntry,
+      startTime: editStartTime,
+      endTime: editEndTime,
+      breakMinutes: editBreakMinutes,
+      workedHours: workedHours,
+      note: editNote,
+    }
+
+    const updatedEntries = timeEntries.map((entry) => (entry.id === editingEntry.id ? updatedEntry : entry))
+
+    setTimeEntries(updatedEntries)
+    saveToStorage(updatedEntries, dailyTargetHours, weeklyTargetHours, overtimeHistory, absenceSettings)
+    setIsEditDialogOpen(false)
+    setEditingEntry(null)
+
+    toast({
+      title: "Eintrag aktualisiert",
+      description: "Der Zeiteintrag wurde erfolgreich bearbeitet.",
+    })
+  }
+
+  const timeToMinutes = (time: string): number => {
+    const [hours, minutes] = time.split(":").map(Number)
+    return hours * 60 + minutes
+  }
+
   const generatePDFReport = async () => {
-    const reportData = getMonthlyReportData(reportMonth)
+    try {
+      const reportData = getMonthlyReportData(reportMonth)
 
-    // Dynamic import to avoid SSR issues
-    const jsPDF = (await import("jspdf")).default
-
-    const doc = new jsPDF()
-    const pageWidth = doc.internal.pageSize.width
-    const margin = 20
-    let yPosition = margin
-
-    // Header
-    doc.setFontSize(20)
-    doc.setFont("helvetica", "bold")
-    doc.text("Arbeitszeit-Bericht", pageWidth / 2, yPosition, { align: "center" })
-    yPosition += 15
-
-    doc.setFontSize(14)
-    doc.setFont("helvetica", "normal")
-    doc.text(reportData.month, pageWidth / 2, yPosition, { align: "center" })
-    yPosition += 20
-
-    // Summary section
-    doc.setFontSize(16)
-    doc.setFont("helvetica", "bold")
-    doc.text("Zusammenfassung", margin, yPosition)
-    yPosition += 15
-
-    doc.setFontSize(12)
-    doc.setFont("helvetica", "normal")
-
-    const summaryData = [
-      ["Arbeitstage:", `${reportData.workDays}`],
-      ["Gearbeitete Stunden:", `${reportData.totalWorkedHours.toFixed(2)}h`],
-      ["Sollstunden:", `${reportData.totalTargetHours.toFixed(2)}h`],
-      ["Überstunden:", `${reportData.monthlyOvertime >= 0 ? "+" : ""}${reportData.monthlyOvertime.toFixed(2)}h`],
-      ["Urlaubstage:", `${reportData.vacationDays}`],
-      ["Kranktage:", `${reportData.sickDays}`],
-      ["Feiertage:", `${reportData.holidayDays}`],
-    ]
-
-    summaryData.forEach(([label, value]) => {
-      doc.text(label, margin, yPosition)
-      doc.text(value, margin + 80, yPosition)
-      yPosition += 8
-    })
-
-    yPosition += 15
-
-    // Detailed entries section
-    doc.setFontSize(16)
-    doc.setFont("helvetica", "bold")
-    doc.text("Detaillierte Einträge", margin, yPosition)
-    yPosition += 15
-
-    // Table header
-    doc.setFontSize(10)
-    doc.setFont("helvetica", "bold")
-    const headers = ["Datum", "Typ", "Von", "Bis", "Pause", "Stunden", "Notiz"]
-    const colWidths = [25, 20, 15, 15, 15, 20, 60]
-    let xPosition = margin
-
-    headers.forEach((header, index) => {
-      doc.text(header, xPosition, yPosition)
-      xPosition += colWidths[index]
-    })
-    yPosition += 8
-
-    // Draw line under header
-    doc.line(margin, yPosition - 2, pageWidth - margin, yPosition - 2)
-    yPosition += 5
-
-    // Table rows
-    doc.setFont("helvetica", "normal")
-    reportData.entries.forEach((entry) => {
-      if (yPosition > 250) {
-        // New page if needed
-        doc.addPage()
-        yPosition = margin
+      if (reportData.entries.length === 0) {
+        toast({
+          title: "Keine Daten",
+          description: "Für den ausgewählten Monat sind keine Einträge vorhanden.",
+          variant: "destructive",
+        })
+        return
       }
 
-      xPosition = margin
-      const rowData = [
-        new Date(entry.date).toLocaleDateString("de-DE"),
-        entry.type === "work"
-          ? "Arbeit"
-          : entry.type === "vacation"
-            ? "Urlaub"
-            : entry.type === "sick"
-              ? "Krank"
-              : "Feiertag",
-        entry.startTime || "-",
-        entry.endTime || "-",
-        entry.type === "work" ? `${entry.breakMinutes}min` : "-",
-        entry.type === "work" ? `${entry.workedHours.toFixed(2)}h` : "-",
-        entry.note || "",
+      // Dynamic import to avoid SSR issues
+      const jsPDF = (await import("jspdf")).default
+
+      const doc = new jsPDF()
+      const pageWidth = doc.internal.pageSize.width
+      const margin = 20
+      let yPosition = margin
+
+      // Header
+      doc.setFontSize(20)
+      doc.setFont("helvetica", "bold")
+      doc.text("Arbeitszeit-Bericht", pageWidth / 2, yPosition, { align: "center" })
+      yPosition += 15
+
+      doc.setFontSize(14)
+      doc.setFont("helvetica", "normal")
+      doc.text(reportData.month, pageWidth / 2, yPosition, { align: "center" })
+      yPosition += 20
+
+      // Summary section
+      doc.setFontSize(16)
+      doc.setFont("helvetica", "bold")
+      doc.text("Zusammenfassung", margin, yPosition)
+      yPosition += 15
+
+      doc.setFontSize(12)
+      doc.setFont("helvetica", "normal")
+
+      const summaryData = [
+        ["Arbeitstage:", `${reportData.workDays}`],
+        ["Gearbeitete Stunden:", `${reportData.totalWorkedHours.toFixed(2)}h`],
+        ["Sollstunden:", `${reportData.totalTargetHours.toFixed(2)}h`],
+        ["Überstunden:", `${reportData.monthlyOvertime >= 0 ? "+" : ""}${reportData.monthlyOvertime.toFixed(2)}h`],
+        ["Urlaubstage:", `${reportData.vacationDays}`],
+        ["Kranktage:", `${reportData.sickDays}`],
+        ["Feiertage:", `${reportData.holidayDays}`],
       ]
 
-      rowData.forEach((data, index) => {
-        const text = data.length > 15 ? data.substring(0, 12) + "..." : data
-        doc.text(text, xPosition, yPosition)
+      summaryData.forEach(([label, value]) => {
+        doc.text(label, margin, yPosition)
+        doc.text(value, margin + 80, yPosition)
+        yPosition += 8
+      })
+
+      yPosition += 15
+
+      // Detailed entries section
+      doc.setFontSize(16)
+      doc.setFont("helvetica", "bold")
+      doc.text("Detaillierte Einträge", margin, yPosition)
+      yPosition += 15
+
+      // Table header
+      doc.setFontSize(10)
+      doc.setFont("helvetica", "bold")
+      const headers = ["Datum", "Typ", "Von", "Bis", "Pause", "Stunden", "Notiz"]
+      const colWidths = [25, 20, 15, 15, 15, 20, 60]
+      let xPosition = margin
+
+      headers.forEach((header, index) => {
+        doc.text(header, xPosition, yPosition)
         xPosition += colWidths[index]
       })
-      yPosition += 6
-    })
+      yPosition += 8
 
-    // Footer
-    const now = new Date()
-    doc.setFontSize(8)
-    doc.text(
-      `Erstellt am ${now.toLocaleDateString("de-DE")} um ${now.toLocaleTimeString("de-DE")}`,
-      pageWidth / 2,
-      doc.internal.pageSize.height - 10,
-      { align: "center" },
-    )
+      // Draw line under header
+      doc.line(margin, yPosition - 2, pageWidth - margin, yPosition - 2)
+      yPosition += 5
 
-    // Save PDF
-    doc.save(`Arbeitszeit-Bericht-${reportData.month.replace(" ", "-")}.pdf`)
+      // Table rows
+      doc.setFont("helvetica", "normal")
+      reportData.entries.forEach((entry) => {
+        if (yPosition > 250) {
+          // New page if needed
+          doc.addPage()
+          yPosition = margin
+        }
+
+        xPosition = margin
+        const rowData = [
+          new Date(entry.date).toLocaleDateString("de-DE"),
+          entry.type === "work"
+            ? "Arbeit"
+            : entry.type === "vacation"
+              ? "Urlaub"
+              : entry.type === "sick"
+                ? "Krank"
+                : "Feiertag",
+          entry.startTime || "-",
+          entry.endTime || "-",
+          entry.type === "work" ? `${entry.breakMinutes}min` : "-",
+          entry.type === "work" ? `${entry.workedHours.toFixed(2)}h` : "-",
+          entry.note || "",
+        ]
+
+        rowData.forEach((data, index) => {
+          const text = data.length > 15 ? data.substring(0, 12) + "..." : data
+          doc.text(text, xPosition, yPosition)
+          xPosition += colWidths[index]
+        })
+        yPosition += 6
+      })
+
+      // Footer
+      const now = new Date()
+      doc.setFontSize(8)
+      doc.text(
+        `Erstellt am ${now.toLocaleDateString("de-DE")} um ${now.toLocaleTimeString("de-DE")}`,
+        pageWidth / 2,
+        doc.internal.pageSize.height - 10,
+        { align: "center" },
+      )
+
+      doc.save(`Arbeitszeit-Bericht-${reportData.month.replace(" ", "-")}.pdf`)
+
+      toast({
+        title: "PDF erstellt",
+        description: "Der Arbeitszeit-Bericht wurde erfolgreich heruntergeladen.",
+      })
+    } catch (error) {
+      console.error("PDF generation error:", error)
+      toast({
+        title: "Fehler beim PDF-Export",
+        description: "Der PDF-Bericht konnte nicht erstellt werden. Bitte versuchen Sie es erneut.",
+        variant: "destructive",
+      })
+    }
   }
 
   return (
@@ -1282,16 +1369,38 @@ const ZeiterfassungApp = () => {
                             {entry.note && <p className="text-sm text-muted-foreground">{entry.note}</p>}
                           </div>
                         </div>
-                        <div className="text-right">
-                          <Badge variant="outline">
-                            {entry.type === "work" && "Arbeit"}
-                            {entry.type === "vacation" && "Urlaub"}
-                            {entry.type === "sick" && "Krank"}
-                            {entry.type === "holiday" && "Feiertag"}
-                          </Badge>
-                          {entry.type === "work" && (
-                            <p className="text-sm text-muted-foreground mt-1">Pause: {entry.breakMinutes}min</p>
-                          )}
+                        <div className="flex items-center gap-2">
+                          <div className="text-right">
+                            <Badge variant="outline">
+                              {entry.type === "work" && "Arbeit"}
+                              {entry.type === "vacation" && "Urlaub"}
+                              {entry.type === "sick" && "Krank"}
+                              {entry.type === "holiday" && "Feiertag"}
+                            </Badge>
+                            {entry.type === "work" && (
+                              <p className="text-sm text-muted-foreground mt-1">Pause: {entry.breakMinutes}min</p>
+                            )}
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            {entry.type === "work" && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => startEditEntry(entry)}
+                                className="h-8 w-8 p-0"
+                              >
+                                <Edit size={14} />
+                              </Button>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => deleteEntry(entry.id)}
+                              className="h-8 w-8 p-0 text-red-600 hover:text-red-700 hover:bg-red-50"
+                            >
+                              <Trash2 size={14} />
+                            </Button>
+                          </div>
                         </div>
                       </div>
                     ))
@@ -1303,6 +1412,63 @@ const ZeiterfassungApp = () => {
                 </div>
               </CardContent>
             </Card>
+
+            <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
+              <DialogContent className="sm:max-w-md">
+                <DialogHeader>
+                  <DialogTitle>Zeiteintrag bearbeiten</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <Label htmlFor="edit-start-time">Startzeit</Label>
+                      <Input
+                        id="edit-start-time"
+                        type="time"
+                        value={editStartTime}
+                        onChange={(e) => setEditStartTime(e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="edit-end-time">Endzeit</Label>
+                      <Input
+                        id="edit-end-time"
+                        type="time"
+                        value={editEndTime}
+                        onChange={(e) => setEditEndTime(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <Label htmlFor="edit-break">Pause (Minuten)</Label>
+                    <Input
+                      id="edit-break"
+                      type="number"
+                      min="0"
+                      value={editBreakMinutes}
+                      onChange={(e) => setEditBreakMinutes(Number(e.target.value))}
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="edit-note">Notiz (optional)</Label>
+                    <Textarea
+                      id="edit-note"
+                      value={editNote}
+                      onChange={(e) => setEditNote(e.target.value)}
+                      placeholder="Zusätzliche Informationen..."
+                    />
+                  </div>
+                  <div className="flex gap-2 pt-4">
+                    <Button onClick={saveEditedEntry} className="flex-1">
+                      Speichern
+                    </Button>
+                    <Button variant="outline" onClick={() => setIsEditDialogOpen(false)} className="flex-1">
+                      Abbrechen
+                    </Button>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
 
             {/* Quick Stats */}
             <div className="grid grid-cols-2 gap-4">
