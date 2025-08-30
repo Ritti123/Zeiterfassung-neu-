@@ -2,7 +2,7 @@
 
 import type React from "react"
 
-import { useState, useEffect, useRef } from "react"
+import { useState, useEffect, useRef, useMemo } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -12,7 +12,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import { Alert, AlertDescription } from "@/components/ui/alert"
-import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { useToast } from "@/hooks/use-toast"
 import {
   Clock,
@@ -36,12 +36,14 @@ import {
 interface TimeEntry {
   id: string
   date: string
-  startTime: string
-  endTime: string
-  breakMinutes: number
+  startTime?: string
+  endTime?: string
+  breakMinutes?: number
   workedHours: number
-  type: "work" | "vacation" | "sick" | "holiday"
+  type: "work" | "vacation" | "sick" | "holiday" | "overtime_compensation"
   note?: string
+  customTargetHours?: number
+  overtimeHours?: number
 }
 
 interface WeeklyTargetHours {
@@ -125,10 +127,18 @@ const ZeiterfassungApp = () => {
 
   const [workDate, setWorkDate] = useState(new Date().toISOString().split("T")[0])
 
-  const getTargetHoursForDate = (date: string): number => {
-    const dateObj = new Date(date)
-    const dayName = getWeekDayName(dateObj)
-    return weeklyTargetHours[dayName]
+  const [workTargetHours, setWorkTargetHours] = useState(8)
+
+  const getTargetHoursForDate = (dateStr: string, entry?: TimeEntry): number => {
+    if (entry?.customTargetHours) {
+      return entry.customTargetHours
+    }
+
+    const date = new Date(dateStr)
+    const dayOfWeek = date.getDay()
+    const dayNames = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"]
+    const dayName = dayNames[dayOfWeek] as keyof typeof weeklyTargetHours
+    return weeklyTargetHours[dayName] || dailyTargetHours
   }
 
   // Update current time every second
@@ -497,6 +507,12 @@ const ZeiterfassungApp = () => {
     }
   }
 
+  const handleWorkDateChange = (date: string) => {
+    setWorkDate(date)
+    const targetForDate = getTargetHoursForDate(date)
+    setWorkTargetHours(targetForDate)
+  }
+
   const calculateOvertimeStats = () => {
     const today = new Date()
     const todayStr = today.toISOString().split("T")[0]
@@ -658,6 +674,7 @@ const ZeiterfassungApp = () => {
       workedHours,
       type: "work",
       note: workNote,
+      customTargetHours: workTargetHours !== getTargetHoursForDate(workDate) ? workTargetHours : undefined,
     }
 
     const updatedEntries = [...timeEntries, newEntry]
@@ -671,10 +688,29 @@ const ZeiterfassungApp = () => {
     setEndTime("")
     setBreakMinutes(30)
     setWorkNote("")
+    setWorkTargetHours(getTargetHoursForDate(workDate))
   }
 
   const saveAbsenceEntry = () => {
-    if (!absenceDate || !absenceType) return
+    if (!absenceDate || !absenceType) {
+      toast({
+        title: "Fehler",
+        description: "Bitte wählen Sie ein Datum und einen Abwesenheitstyp aus.",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // Check if entry already exists for this date
+    const existingEntry = timeEntries.find((entry) => entry.date === absenceDate)
+    if (existingEntry) {
+      toast({
+        title: "Fehler",
+        description: "Für dieses Datum existiert bereits ein Eintrag.",
+        variant: "destructive",
+      })
+      return
+    }
 
     const newEntry: TimeEntry = {
       id: `${absenceType}-${Date.now()}`,
@@ -692,7 +728,7 @@ const ZeiterfassungApp = () => {
     if (useOvertimeCompensation && overtimeCompensationHours > 0) {
       const compensationEntry: OvertimeEntry = {
         id: `overtime-compensation-${Date.now()}`,
-        date: absenceDate, // Using absenceDate for consistency
+        date: absenceDate,
         type: "overtime_free",
         hours: -overtimeCompensationHours,
         description: `Überstundenausgleich für ${absenceType === "vacation" ? "Urlaub" : absenceType === "sick" ? "Krankheit" : "Feiertag"}`,
@@ -712,6 +748,11 @@ const ZeiterfassungApp = () => {
     setAbsenceNote("")
     setUseOvertimeCompensation(false)
     setOvertimeCompensationHours(0)
+
+    toast({
+      title: "Abwesenheit gespeichert",
+      description: `${absenceType === "vacation" ? "Urlaub" : absenceType === "sick" ? "Kranktag" : "Feiertag"} wurde erfolgreich eingetragen.`,
+    })
   }
 
   const todayStr = new Date().toISOString().split("T")[0]
@@ -719,7 +760,19 @@ const ZeiterfassungApp = () => {
   const todayWorkEntries = todayEntries.filter((entry) => entry.type === "work")
   const todayAbsenceEntries = todayEntries.filter((entry) => entry.type !== "work")
 
-  const overtimeStats = calculateOvertimeStats()
+  const overtimeStats = useMemo(() => {
+    try {
+      return calculateOvertimeStats()
+    } catch (error) {
+      console.error("[v0] Error calculating overtime stats:", error)
+      return {
+        daily: { worked: 0, target: 0, overtime: 0 },
+        weekly: { worked: 0, target: 0, overtime: 0 },
+        monthly: { worked: 0, target: 0, overtime: 0 },
+        cumulative: { worked: 0, target: 0, overtime: 0 },
+      }
+    }
+  }, [timeEntries, dailyTargetHours, weeklyTargetHours])
   const absenceStats = getAbsenceStats()
 
   const todayStats = {
@@ -805,28 +858,57 @@ const ZeiterfassungApp = () => {
 
   const startEditEntry = (entry: TimeEntry) => {
     setEditingEntry(entry)
-    setEditStartTime(entry.startTime)
-    setEditEndTime(entry.endTime)
-    setEditBreakMinutes(entry.breakMinutes)
+    if (entry.type === "work") {
+      setEditStartTime(entry.startTime)
+      setEditEndTime(entry.endTime)
+      setEditBreakMinutes(entry.breakMinutes)
+    } else {
+      setAbsenceType(entry.type as "vacation" | "sick" | "holiday" | "overtime_compensation")
+      setAbsenceDate(entry.date)
+      // Für Überstunden-Ausgleich die Stunden setzen
+      if (entry.type === "overtime_compensation" && entry.overtimeHours) {
+        setOvertimeCompensationHours(entry.overtimeHours)
+      }
+    }
     setEditNote(entry.note || "")
     setIsEditDialogOpen(true)
+  }
+
+  const timeToMinutes = (time: string): number => {
+    const [hours, minutes] = time.split(":").map(Number)
+    return hours * 60 + minutes
   }
 
   const saveEditedEntry = () => {
     if (!editingEntry) return
 
-    const startMinutes = timeToMinutes(editStartTime)
-    const endMinutes = timeToMinutes(editEndTime)
-    const workedMinutes = endMinutes - startMinutes - editBreakMinutes
-    const workedHours = Math.max(0, workedMinutes / 60)
+    let updatedEntry: TimeEntry
 
-    const updatedEntry: TimeEntry = {
-      ...editingEntry,
-      startTime: editStartTime,
-      endTime: editEndTime,
-      breakMinutes: editBreakMinutes,
-      workedHours: workedHours,
-      note: editNote,
+    if (editingEntry.type === "work") {
+      const startMinutes = timeToMinutes(editStartTime)
+      const endMinutes = timeToMinutes(editEndTime)
+      const workedMinutes = endMinutes - startMinutes - editBreakMinutes
+      const workedHours = Math.max(0, workedMinutes / 60)
+
+      updatedEntry = {
+        ...editingEntry,
+        startTime: editStartTime,
+        endTime: editEndTime,
+        breakMinutes: editBreakMinutes,
+        workedHours: workedHours,
+        note: editNote,
+      }
+    } else {
+      updatedEntry = {
+        ...editingEntry,
+        type: absenceType,
+        date: absenceDate,
+        note: editNote,
+        // Für Überstunden-Ausgleich die Stunden hinzufügen
+        ...(absenceType === "overtime_compensation" && {
+          overtimeHours: overtimeCompensationHours,
+        }),
+      }
     }
 
     const updatedEntries = timeEntries.map((entry) => (entry.id === editingEntry.id ? updatedEntry : entry))
@@ -836,15 +918,14 @@ const ZeiterfassungApp = () => {
     setIsEditDialogOpen(false)
     setEditingEntry(null)
 
+    // Reset form
+    setAbsenceDate("")
+    setAbsenceNote("")
+
     toast({
       title: "Eintrag aktualisiert",
-      description: "Der Zeiteintrag wurde erfolgreich bearbeitet.",
+      description: "Der Eintrag wurde erfolgreich bearbeitet.",
     })
-  }
-
-  const timeToMinutes = (time: string): number => {
-    const [hours, minutes] = time.split(":").map(Number)
-    return hours * 60 + minutes
   }
 
   const generatePDFReport = async () => {
@@ -1046,9 +1127,29 @@ const ZeiterfassungApp = () => {
                     id="work-date"
                     type="date"
                     value={workDate}
-                    onChange={(e) => setWorkDate(e.target.value)}
+                    onChange={(e) => handleWorkDateChange(e.target.value)}
                     className="mt-1"
                   />
+                </div>
+
+                <div>
+                  <Label htmlFor="work-target-hours" className="text-sm">
+                    Sollstunden für diesen Tag
+                  </Label>
+                  <Input
+                    id="work-target-hours"
+                    type="number"
+                    value={workTargetHours}
+                    onChange={(e) => setWorkTargetHours(Number(e.target.value))}
+                    className="mt-1"
+                    min="0"
+                    max="24"
+                    step="0.5"
+                    placeholder="z.B. 8"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    Standard: {getTargetHoursForDate(workDate)}h (aus Einstellungen)
+                  </p>
                 </div>
 
                 <div className="grid grid-cols-2 gap-4">
@@ -1594,16 +1695,14 @@ const ZeiterfassungApp = () => {
                             )}
                           </div>
                           <div className="flex flex-col gap-1">
-                            {entry.type === "work" && (
-                              <Button
-                                variant="ghost"
-                                size="sm"
-                                onClick={() => startEditEntry(entry)}
-                                className="h-8 w-8 p-0"
-                              >
-                                <Edit size={14} />
-                              </Button>
-                            )}
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              onClick={() => startEditEntry(entry)}
+                              className="h-8 w-8 p-0"
+                            >
+                              <Edit size={14} />
+                            </Button>
                             <Button
                               variant="ghost"
                               size="sm"
@@ -1628,57 +1727,104 @@ const ZeiterfassungApp = () => {
             <Dialog open={isEditDialogOpen} onOpenChange={setIsEditDialogOpen}>
               <DialogContent className="sm:max-w-md">
                 <DialogHeader>
-                  <DialogTitle>Zeiteintrag bearbeiten</DialogTitle>
+                  <DialogTitle>
+                    {editingEntry?.type === "work" ? "Arbeitszeit bearbeiten" : "Abwesenheit bearbeiten"}
+                  </DialogTitle>
                 </DialogHeader>
                 <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <Label htmlFor="edit-start-time">Startzeit</Label>
-                      <Input
-                        id="edit-start-time"
-                        type="time"
-                        value={editStartTime}
-                        onChange={(e) => setEditStartTime(e.target.value)}
-                      />
-                    </div>
-                    <div>
-                      <Label htmlFor="edit-end-time">Endzeit</Label>
-                      <Input
-                        id="edit-end-time"
-                        type="time"
-                        value={editEndTime}
-                        onChange={(e) => setEditEndTime(e.target.value)}
-                      />
-                    </div>
-                  </div>
+                  {editingEntry?.type === "work" ? (
+                    <>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <Label htmlFor="edit-start-time">Startzeit</Label>
+                          <Input
+                            id="edit-start-time"
+                            type="time"
+                            value={editStartTime}
+                            onChange={(e) => setEditStartTime(e.target.value)}
+                          />
+                        </div>
+                        <div>
+                          <Label htmlFor="edit-end-time">Endzeit</Label>
+                          <Input
+                            id="edit-end-time"
+                            type="time"
+                            value={editEndTime}
+                            onChange={(e) => setEditEndTime(e.target.value)}
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <Label htmlFor="edit-break-minutes">Pause (Minuten)</Label>
+                        <Input
+                          id="edit-break-minutes"
+                          type="number"
+                          min="0"
+                          value={editBreakMinutes}
+                          onChange={(e) => setEditBreakMinutes(Number.parseInt(e.target.value) || 0)}
+                        />
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div>
+                        <Label htmlFor="edit-absence-date">Datum</Label>
+                        <Input
+                          id="edit-absence-date"
+                          type="date"
+                          value={absenceDate}
+                          onChange={(e) => setAbsenceDate(e.target.value)}
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="edit-absence-type">Abwesenheitstyp</Label>
+                        <select
+                          id="edit-absence-type"
+                          value={absenceType}
+                          onChange={(e) =>
+                            setAbsenceType(e.target.value as "vacation" | "sick" | "holiday" | "overtime_compensation")
+                          }
+                          className="w-full p-2 border rounded-md"
+                        >
+                          <option value="vacation">Urlaub</option>
+                          <option value="sick">Krank</option>
+                          <option value="holiday">Feiertag</option>
+                          <option value="overtime_compensation">Überstunden frei</option>
+                        </select>
+                      </div>
+                      {absenceType === "overtime_compensation" && (
+                        <div>
+                          <Label htmlFor="edit-overtime-hours">Überstunden (Stunden)</Label>
+                          <Input
+                            id="edit-overtime-hours"
+                            type="number"
+                            min="0.5"
+                            max="12"
+                            step="0.5"
+                            value={overtimeCompensationHours}
+                            onChange={(e) => setOvertimeCompensationHours(Number.parseFloat(e.target.value) || 0)}
+                          />
+                        </div>
+                      )}
+                    </>
+                  )}
                   <div>
-                    <Label htmlFor="edit-break">Pause (Minuten)</Label>
-                    <Input
-                      id="edit-break"
-                      type="number"
-                      min="0"
-                      value={editBreakMinutes}
-                      onChange={(e) => setEditBreakMinutes(Number(e.target.value))}
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="edit-note">Notiz (optional)</Label>
+                    <Label htmlFor="edit-note">Notiz</Label>
                     <Textarea
                       id="edit-note"
                       value={editNote}
                       onChange={(e) => setEditNote(e.target.value)}
                       placeholder="Zusätzliche Informationen..."
+                      rows={2}
                     />
                   </div>
-                  <div className="flex gap-2 pt-4">
-                    <Button onClick={saveEditedEntry} className="flex-1">
-                      Speichern
-                    </Button>
-                    <Button variant="outline" onClick={() => setIsEditDialogOpen(false)} className="flex-1">
-                      Abbrechen
-                    </Button>
-                  </div>
                 </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setIsEditDialogOpen(false)}>
+                    Abbrechen
+                  </Button>
+                  <Button onClick={saveEditedEntry}>Speichern</Button>
+                </DialogFooter>
               </DialogContent>
             </Dialog>
 
