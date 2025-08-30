@@ -16,11 +16,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { useToast } from "@/hooks/use-toast"
 import {
   Clock,
-  Play,
-  Square,
   FileText,
   Settings,
-  TrendingUp,
   Calendar,
   Plane,
   Heart,
@@ -33,6 +30,7 @@ import {
   AlertTriangle,
   CheckCircle,
   Edit,
+  Save,
 } from "lucide-react"
 
 interface TimeEntry {
@@ -62,6 +60,9 @@ interface OvertimeEntry {
   weeklyOvertime: number
   monthlyOvertime: number
   cumulativeOvertime: number
+  type?: string
+  hours?: number
+  description?: string
 }
 
 interface AbsenceSettings {
@@ -113,6 +114,17 @@ const ZeiterfassungApp = () => {
   const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
   const { toast } = useToast()
 
+  const [workNote, setWorkNote] = useState("")
+
+  const [absenceStartDate, setAbsenceStartDate] = useState("")
+  const [absenceEndDate, setAbsenceEndDate] = useState("")
+  const [useAbsenceRange, setUseAbsenceRange] = useState(false)
+
+  const [useOvertimeCompensation, setUseOvertimeCompensation] = useState(false)
+  const [overtimeCompensationHours, setOvertimeCompensationHours] = useState(0)
+
+  const [workDate, setWorkDate] = useState(new Date().toISOString().split("T")[0])
+
   const getTargetHoursForDate = (date: string): number => {
     const dateObj = new Date(date)
     const dayName = getWeekDayName(dateObj)
@@ -148,6 +160,38 @@ const ZeiterfassungApp = () => {
     if (savedAbsenceSettings) {
       setAbsenceSettings(JSON.parse(savedAbsenceSettings))
     }
+  }, [])
+
+  useEffect(() => {
+    const checkBackupReminder = () => {
+      const lastBackup = localStorage.getItem("lastBackup")
+      const lastReminder = localStorage.getItem("lastBackupReminder")
+      const now = new Date()
+
+      if (!lastBackup || !lastReminder) {
+        localStorage.setItem("lastBackupReminder", now.toISOString())
+        return
+      }
+
+      const lastReminderDate = new Date(lastReminder)
+      const daysSinceReminder = Math.floor((now.getTime() - lastReminderDate.getTime()) / (1000 * 60 * 60 * 24))
+
+      if (daysSinceReminder >= 7) {
+        const shouldBackup = window.confirm(
+          "🔄 Wöchentliche Backup-Erinnerung\n\nEs ist eine Woche seit der letzten Backup-Erinnerung vergangen. Möchten Sie jetzt ein Backup Ihrer Zeiterfassungsdaten erstellen?\n\nEin regelmäßiges Backup schützt Ihre Daten vor Verlust.",
+        )
+
+        if (shouldBackup) {
+          exportData()
+        }
+
+        localStorage.setItem("lastBackupReminder", now.toISOString())
+      }
+    }
+
+    // Check backup reminder after 5 seconds to avoid blocking initial load
+    const timer = setTimeout(checkBackupReminder, 5000)
+    return () => clearTimeout(timer)
   }, [])
 
   const saveToStorage = (
@@ -413,6 +457,7 @@ const ZeiterfassungApp = () => {
       "thursday",
       "friday",
       "saturday",
+      "sunday",
     ]
     return days[date.getDay()]
   }
@@ -458,16 +503,17 @@ const ZeiterfassungApp = () => {
     const weekStart = getWeekStart(today)
     const monthStart = getMonthStart(today)
 
-    // Daily overtime - exclude absence days from negative calculation
+    // Daily overtime - German rules: absence days count as 8h worked and 8h target
     const todayEntries = timeEntries.filter((entry) => entry.date === todayStr)
     const todayWorkEntries = todayEntries.filter((entry) => entry.type === "work")
     const todayAbsenceEntries = todayEntries.filter((entry) => entry.type !== "work")
 
-    const todayWorked = todayWorkEntries.reduce((sum, entry) => sum + entry.workedHours, 0)
-    const todayTarget = todayAbsenceEntries.length > 0 ? 0 : getTargetHoursForDate(todayStr)
+    const todayWorked =
+      todayWorkEntries.reduce((sum, entry) => sum + entry.workedHours, 0) + (todayAbsenceEntries.length > 0 ? 8 : 0) // Absence = 8h worked
+    const todayTarget = todayAbsenceEntries.length > 0 ? 8 : getTargetHoursForDate(todayStr) // Absence = 8h target
     const dailyOvertime = todayWorked - todayTarget
 
-    // Weekly overtime
+    // Weekly overtime - German rules
     const weekEntries = timeEntries.filter((entry) => {
       const entryDate = new Date(entry.date)
       return entryDate >= weekStart && entryDate <= today
@@ -480,13 +526,16 @@ const ZeiterfassungApp = () => {
       if (entry.type === "work") {
         weeklyWorked += entry.workedHours
         weeklyTarget += getTargetHoursForDate(entry.date)
+      } else {
+        // German rules: absence days = 8h worked and 8h target
+        weeklyWorked += 8
+        weeklyTarget += 8
       }
-      // Absence days don't count towards negative overtime
     })
 
     const weeklyOvertime = weeklyWorked - weeklyTarget
 
-    // Monthly overtime
+    // Monthly overtime - German rules
     const monthEntries = timeEntries.filter((entry) => {
       const entryDate = new Date(entry.date)
       return entryDate >= monthStart && entryDate <= today
@@ -499,12 +548,16 @@ const ZeiterfassungApp = () => {
       if (entry.type === "work") {
         monthlyWorked += entry.workedHours
         monthlyTarget += getTargetHoursForDate(entry.date)
+      } else {
+        // German rules: absence days = 8h worked and 8h target
+        monthlyWorked += 8
+        monthlyTarget += 8
       }
     })
 
     const monthlyOvertime = monthlyWorked - monthlyTarget
 
-    // Cumulative overtime (all time)
+    // Cumulative overtime - German rules
     let cumulativeWorked = 0
     let cumulativeTarget = 0
 
@@ -512,16 +565,36 @@ const ZeiterfassungApp = () => {
       if (entry.type === "work") {
         cumulativeWorked += entry.workedHours
         cumulativeTarget += getTargetHoursForDate(entry.date)
+      } else {
+        // German rules: absence days = 8h worked and 8h target
+        cumulativeWorked += 8
+        cumulativeTarget += 8
       }
     })
 
     const cumulativeOvertime = cumulativeWorked - cumulativeTarget
 
     return {
-      daily: { worked: todayWorked, target: todayTarget, overtime: dailyOvertime },
-      weekly: { worked: weeklyWorked, target: weeklyTarget, overtime: weeklyOvertime },
-      monthly: { worked: monthlyWorked, target: monthlyTarget, overtime: monthlyOvertime },
-      cumulative: { worked: cumulativeWorked, target: cumulativeTarget, overtime: cumulativeOvertime },
+      daily: {
+        worked: Number(todayWorked) || 0,
+        target: Number(todayTarget) || 0,
+        overtime: Number(dailyOvertime) || 0,
+      },
+      weekly: {
+        worked: Number(weeklyWorked) || 0,
+        target: Number(weeklyTarget) || 0,
+        overtime: Number(weeklyOvertime) || 0,
+      },
+      monthly: {
+        worked: Number(monthlyWorked) || 0,
+        target: Number(monthlyTarget) || 0,
+        overtime: Number(monthlyOvertime) || 0,
+      },
+      cumulative: {
+        worked: Number(cumulativeWorked) || 0,
+        target: Number(cumulativeTarget) || 0,
+        overtime: Number(cumulativeOvertime) || 0,
+      },
     }
   }
 
@@ -556,6 +629,7 @@ const ZeiterfassungApp = () => {
       breakMinutes,
       workedHours,
       type: "work",
+      note: workNote,
     }
 
     const updatedEntries = [...timeEntries, newEntry]
@@ -568,20 +642,22 @@ const ZeiterfassungApp = () => {
     setStartTime("")
     setEndTime("")
     setBreakMinutes(30)
+    setWorkNote("")
   }
 
-  const saveAbsenceEntry = () => {
-    if (!absenceDate || !absenceType) return
+  const saveWorkEntry = () => {
+    if (!startTime || !endTime) return
 
+    const workedHours = calculateWorkedHours(startTime, endTime, breakMinutes)
     const newEntry: TimeEntry = {
       id: Date.now().toString(),
-      date: absenceDate,
-      startTime: "",
-      endTime: "",
-      breakMinutes: 0,
-      workedHours: 0,
-      type: absenceType,
-      note: absenceNote,
+      date: workDate,
+      startTime,
+      endTime,
+      breakMinutes,
+      workedHours,
+      type: "work",
+      note: workNote,
     }
 
     const updatedEntries = [...timeEntries, newEntry]
@@ -591,18 +667,67 @@ const ZeiterfassungApp = () => {
     saveToStorage(updatedEntries, dailyTargetHours, weeklyTargetHours, updatedOvertimeHistory, absenceSettings)
 
     // Reset form
-    setAbsenceDate("")
-    setAbsenceType("vacation")
-    setAbsenceNote("")
+    setStartTime("")
+    setEndTime("")
+    setBreakMinutes(30)
+    setWorkNote("")
   }
 
-  const todayStats = {
-    totalHours: 0,
-    targetHours: 0,
-    overtime: 0,
+  const saveAbsenceEntry = () => {
+    if (!absenceDate || !absenceType) return
+
+    const newEntry: TimeEntry = {
+      id: `${absenceType}-${Date.now()}`,
+      date: absenceDate,
+      type: absenceType,
+      startTime: "",
+      endTime: "",
+      breakMinutes: 0,
+      workedHours: 0,
+      note: absenceNote,
+    }
+
+    const updatedEntries = [...timeEntries, newEntry]
+
+    if (useOvertimeCompensation && overtimeCompensationHours > 0) {
+      const compensationEntry: OvertimeEntry = {
+        id: `overtime-compensation-${Date.now()}`,
+        date: absenceDate, // Using absenceDate for consistency
+        type: "overtime_free",
+        hours: -overtimeCompensationHours,
+        description: `Überstundenausgleich für ${absenceType === "vacation" ? "Urlaub" : absenceType === "sick" ? "Krankheit" : "Feiertag"}`,
+      }
+
+      const updatedOvertimeHistory = [...overtimeHistory, compensationEntry]
+      setOvertimeHistory(updatedOvertimeHistory)
+      saveToStorage(updatedEntries, dailyTargetHours, weeklyTargetHours, updatedOvertimeHistory, absenceSettings)
+    } else {
+      saveToStorage(updatedEntries, dailyTargetHours, weeklyTargetHours, overtimeHistory, absenceSettings)
+    }
+
+    setTimeEntries(updatedEntries)
+
+    // Reset form
+    setAbsenceDate("")
+    setAbsenceNote("")
+    setUseOvertimeCompensation(false)
+    setOvertimeCompensationHours(0)
   }
+
+  const todayStr = new Date().toISOString().split("T")[0]
+  const todayEntries = timeEntries.filter((entry) => entry.date === todayStr)
+  const todayWorkEntries = todayEntries.filter((entry) => entry.type === "work")
+  const todayAbsenceEntries = todayEntries.filter((entry) => entry.type !== "work")
+
   const overtimeStats = calculateOvertimeStats()
   const absenceStats = getAbsenceStats()
+
+  const todayStats = {
+    totalHours:
+      todayWorkEntries.reduce((sum, entry) => sum + entry.workedHours, 0) + (todayAbsenceEntries.length > 0 ? 8 : 0), // Deutsche Regeln: Abwesenheit = 8h
+    targetHours: todayAbsenceEntries.length > 0 ? 8 : getTargetHoursForDate(todayStr),
+    overtime: overtimeStats.daily.overtime,
+  }
 
   const TabButton = ({
     id,
@@ -878,38 +1003,121 @@ const ZeiterfassungApp = () => {
       {/* Main Content */}
       <div className="p-4 pb-20">
         {activeTab === "zeiterfassung" && (
-          <div className="space-y-4">
-            {/* Today's Stats */}
+          <div className="space-y-6">
+            {/* Today's Overview */}
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-lg">Heute</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Gearbeitete Stunden</span>
-                  <span className="font-bold">{todayStats.totalHours.toFixed(2)}h</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Sollstunden</span>
-                  <span className="font-bold">{todayStats.targetHours.toFixed(2)}h</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-sm text-muted-foreground">Überstunden</span>
-                  <Badge variant={todayStats.overtime >= 0 ? "default" : "destructive"}>
-                    {todayStats.overtime >= 0 ? "+" : ""}
-                    {todayStats.overtime.toFixed(2)}h
-                  </Badge>
+              <CardContent>
+                <div className="grid grid-cols-3 gap-4 text-center">
+                  <div>
+                    <p className="text-2xl font-bold text-primary">{todayStats.totalHours.toFixed(1)}h</p>
+                    <p className="text-xs text-muted-foreground">Gearbeitet</p>
+                  </div>
+                  <div>
+                    <p className="text-2xl font-bold">{todayStats.targetHours.toFixed(1)}h</p>
+                    <p className="text-xs text-muted-foreground">Soll</p>
+                  </div>
+                  <div>
+                    <p
+                      className={`text-2xl font-bold ${todayStats.overtime >= 0 ? "text-primary" : "text-destructive"}`}
+                    >
+                      {todayStats.overtime >= 0 ? "+" : ""}
+                      {todayStats.overtime.toFixed(1)}h
+                    </p>
+                    <p className="text-xs text-muted-foreground">Überstunden</p>
+                  </div>
                 </div>
               </CardContent>
             </Card>
 
-            {/* Comprehensive Overtime Overview */}
+            {/* Work Time Entry */}
             <Card>
               <CardHeader className="pb-3">
-                <CardTitle className="text-lg flex items-center gap-2">
-                  <TrendingUp size={20} />
-                  Überstunden-Konto
-                </CardTitle>
+                <CardTitle className="text-lg">Arbeitszeit erfassen</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div>
+                  <Label htmlFor="work-date" className="text-sm">
+                    Datum
+                  </Label>
+                  <Input
+                    id="work-date"
+                    type="date"
+                    value={workDate}
+                    onChange={(e) => setWorkDate(e.target.value)}
+                    className="mt-1"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="start-time" className="text-sm">
+                      Startzeit
+                    </Label>
+                    <Input
+                      id="start-time"
+                      type="time"
+                      value={startTime}
+                      onChange={(e) => setStartTime(e.target.value)}
+                      className="mt-1"
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="end-time" className="text-sm">
+                      Endzeit
+                    </Label>
+                    <Input
+                      id="end-time"
+                      type="time"
+                      value={endTime}
+                      onChange={(e) => setEndTime(e.target.value)}
+                      className="mt-1"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <Label htmlFor="break-minutes" className="text-sm">
+                    Pause (Minuten)
+                  </Label>
+                  <Input
+                    id="break-minutes"
+                    type="number"
+                    min="0"
+                    max="480"
+                    value={breakMinutes}
+                    onChange={(e) => setBreakMinutes(Number(e.target.value))}
+                    className="mt-1"
+                    placeholder="z.B. 30"
+                  />
+                </div>
+
+                <div>
+                  <Label htmlFor="work-note" className="text-sm">
+                    Notiz (optional)
+                  </Label>
+                  <Input
+                    id="work-note"
+                    value={workNote}
+                    onChange={(e) => setWorkNote(e.target.value)}
+                    className="mt-1"
+                    placeholder="z.B. Projekt XY"
+                  />
+                </div>
+
+                <Button onClick={saveWorkEntry} className="w-full" size="lg">
+                  <Save className="mr-2" size={20} />
+                  Arbeitszeit speichern
+                </Button>
+              </CardContent>
+            </Card>
+
+            {/* Overtime Statistics */}
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="text-lg">Überstunden-Übersicht</CardTitle>
               </CardHeader>
               <CardContent>
                 <Tabs defaultValue="week" className="w-full">
@@ -978,94 +1186,6 @@ const ZeiterfassungApp = () => {
                 </Tabs>
               </CardContent>
             </Card>
-
-            {/* Quick Tracking */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-lg">Schnelle Erfassung</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {!isTracking ? (
-                  <Button onClick={startTracking} className="w-full" size="lg">
-                    <Play className="mr-2" size={20} />
-                    Arbeitszeit starten
-                  </Button>
-                ) : (
-                  <div className="space-y-3">
-                    <div className="text-center p-4 bg-accent/10 rounded-lg">
-                      <p className="text-sm text-muted-foreground">Gestartet um</p>
-                      <p className="text-xl font-bold text-accent">{startTime}</p>
-                    </div>
-                    <Button onClick={stopTracking} variant="destructive" className="w-full" size="lg">
-                      <Square className="mr-2" size={20} />
-                      Arbeitszeit beenden
-                    </Button>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
-            {/* Manual Entry */}
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="text-lg">Manuelle Eingabe</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <Label htmlFor="start-time" className="text-sm">
-                      Beginn
-                    </Label>
-                    <Input
-                      id="start-time"
-                      type="time"
-                      value={startTime}
-                      onChange={(e) => setStartTime(e.target.value)}
-                      className="mt-1"
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="end-time" className="text-sm">
-                      Ende
-                    </Label>
-                    <Input
-                      id="end-time"
-                      type="time"
-                      value={endTime}
-                      onChange={(e) => setEndTime(e.target.value)}
-                      className="mt-1"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <Label htmlFor="break-minutes" className="text-sm">
-                    Pause (Minuten)
-                  </Label>
-                  <Input
-                    id="break-minutes"
-                    type="number"
-                    value={breakMinutes}
-                    onChange={(e) => setBreakMinutes(Number(e.target.value))}
-                    className="mt-1"
-                    min="0"
-                  />
-                </div>
-
-                {startTime && endTime && (
-                  <div className="p-3 bg-muted rounded-lg">
-                    <p className="text-sm text-muted-foreground">Arbeitszeit</p>
-                    <p className="font-bold">
-                      {calculateWorkedHours(startTime, endTime, breakMinutes).toFixed(2)} Stunden
-                    </p>
-                  </div>
-                )}
-
-                <Button onClick={saveTimeEntry} className="w-full" disabled={!startTime || !endTime}>
-                  Zeit erfassen
-                </Button>
-              </CardContent>
-            </Card>
           </div>
         )}
 
@@ -1131,24 +1251,70 @@ const ZeiterfassungApp = () => {
               </CardContent>
             </Card>
 
-            {/* Add Absence */}
             <Card>
               <CardHeader className="pb-3">
                 <CardTitle className="text-lg">Abwesenheit erfassen</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
-                <div>
-                  <Label htmlFor="absence-date" className="text-sm">
-                    Datum
-                  </Label>
-                  <Input
-                    id="absence-date"
-                    type="date"
-                    value={absenceDate}
-                    onChange={(e) => setAbsenceDate(e.target.value)}
-                    className="mt-1"
+                {/* Toggle für Zeitraum-Erfassung */}
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="use-range"
+                    checked={useAbsenceRange}
+                    onChange={(e) => setUseAbsenceRange(e.target.checked)}
+                    className="rounded"
                   />
+                  <Label htmlFor="use-range" className="text-sm">
+                    Zeitraum erfassen (mehrere Tage)
+                  </Label>
                 </div>
+
+                {useAbsenceRange ? (
+                  // Zeitraum-Erfassung
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <Label htmlFor="absence-start-date" className="text-sm">
+                          Von
+                        </Label>
+                        <Input
+                          id="absence-start-date"
+                          type="date"
+                          value={absenceStartDate}
+                          onChange={(e) => setAbsenceStartDate(e.target.value)}
+                          className="mt-1"
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="absence-end-date" className="text-sm">
+                          Bis
+                        </Label>
+                        <Input
+                          id="absence-end-date"
+                          type="date"
+                          value={absenceEndDate}
+                          onChange={(e) => setAbsenceEndDate(e.target.value)}
+                          className="mt-1"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  // Einzeltag-Erfassung
+                  <div>
+                    <Label htmlFor="absence-date" className="text-sm">
+                      Datum
+                    </Label>
+                    <Input
+                      id="absence-date"
+                      type="date"
+                      value={absenceDate}
+                      onChange={(e) => setAbsenceDate(e.target.value)}
+                      className="mt-1"
+                    />
+                  </div>
+                )}
 
                 <div>
                   <Label htmlFor="absence-type" className="text-sm">
@@ -1198,8 +1364,46 @@ const ZeiterfassungApp = () => {
                   />
                 </div>
 
-                <Button onClick={saveAbsenceEntry} className="w-full" disabled={!absenceDate}>
-                  Abwesenheit erfassen
+                <div className="border-t pt-4 space-y-3">
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="use-overtime-compensation"
+                      checked={useOvertimeCompensation}
+                      onChange={(e) => setUseOvertimeCompensation(e.target.checked)}
+                      className="rounded"
+                    />
+                    <Label htmlFor="use-overtime-compensation" className="text-sm">
+                      Überstundenausgleich verwenden
+                    </Label>
+                  </div>
+
+                  {useOvertimeCompensation && (
+                    <div>
+                      <Label htmlFor="overtime-compensation-hours" className="text-sm">
+                        Überstunden abziehen (Stunden)
+                      </Label>
+                      <Input
+                        id="overtime-compensation-hours"
+                        type="number"
+                        min="0"
+                        max="40"
+                        step="0.5"
+                        value={overtimeCompensationHours}
+                        onChange={(e) => setOvertimeCompensationHours(Number.parseFloat(e.target.value) || 0)}
+                        className="mt-1"
+                        placeholder="z.B. 8"
+                      />
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Aktuelles Überstundenkonto: {(overtimeStats.cumulative?.overtime || 0).toFixed(1)} Std
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                <Button onClick={saveAbsenceEntry} className="w-full" size="lg">
+                  <Save className="mr-2" size={20} />
+                  {useAbsenceRange ? "Zeitraum speichern" : "Abwesenheit speichern"}
                 </Button>
               </CardContent>
             </Card>
@@ -1216,30 +1420,38 @@ const ZeiterfassungApp = () => {
                     .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
                     .slice(0, 5)
                     .map((entry) => (
-                      <div key={entry.id} className="flex items-center justify-between p-3 bg-muted rounded-lg">
-                        <div className="flex items-center gap-3">
-                          {entry.type === "vacation" && <Plane size={16} className="text-blue-600" />}
-                          {entry.type === "sick" && <Heart size={16} className="text-red-600" />}
-                          {entry.type === "holiday" && <Coffee size={16} className="text-green-600" />}
-                          <div>
-                            <p className="font-medium">
-                              {new Date(entry.date).toLocaleDateString("de-DE", {
-                                weekday: "short",
-                                day: "2-digit",
-                                month: "2-digit",
-                                year: "numeric",
-                              })}
-                            </p>
-                            {entry.note && <p className="text-sm text-muted-foreground">{entry.note}</p>}
+                      <div key={entry.id} className="flex justify-between items-center p-3 bg-muted/50 rounded-lg">
+                        <div>
+                          <div className="font-medium">{new Date(entry.date).toLocaleDateString("de-DE")}</div>
+                          <div className="text-sm text-muted-foreground">
+                            {entry.type === "vacation" ? "Urlaub" : entry.type === "sick" ? "Krank" : "Feiertag"}
+                            {entry.note && ` - ${entry.note}`}
                           </div>
                         </div>
-                        <Badge variant="outline">
-                          {entry.type === "vacation" && "Urlaub"}
-                          {entry.type === "sick" && "Krank"}
-                          {entry.type === "holiday" && "Feiertag"}
-                        </Badge>
+                        <Badge variant="outline">8h</Badge>
                       </div>
                     ))}
+
+                  {overtimeHistory
+                    .filter((entry) => entry.type === "compensation" || entry.type === "overtime_free")
+                    .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
+                    .slice(0, 3)
+                    .map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="flex justify-between items-center p-3 bg-blue-50 dark:bg-blue-950/20 rounded-lg"
+                      >
+                        <div>
+                          <div className="font-medium">{new Date(entry.date).toLocaleDateString("de-DE")}</div>
+                          <div className="text-sm text-muted-foreground">
+                            {entry.type === "overtime_free" ? "Überstunden frei" : "Überstundenausgleich"}
+                          </div>
+                          <div className="text-xs text-muted-foreground">{entry.description}</div>
+                        </div>
+                        <Badge variant="secondary">{entry.hours.toFixed(1)}h</Badge>
+                      </div>
+                    ))}
+
                   {timeEntries.filter((entry) => entry.type !== "work").length === 0 && (
                     <p className="text-muted-foreground text-center py-4">Noch keine Abwesenheiten erfasst</p>
                   )}
